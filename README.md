@@ -91,7 +91,19 @@ open http://localhost:8080/modelinfod
 State (overrides, custom models, cached upstream list) lives in the
 `modelinfod-data` volume as a single JSON file.
 
-## Reverse-proxy snippet (nginx)
+## Reverse-proxy examples
+
+Validated example configs live in [`examples/`](examples/):
+
+- [`examples/nginx/`](examples/nginx/) — full server block routing
+  `/v1/model/info`, `/model/info` and `/modelinfod` to modelinfod and
+  everything else to your gateway (SSE-safe settings included).
+- [`examples/cloudflared/`](examples/cloudflared/) — tunnel ingress rules
+  with path regexes, plus [`ACCESS.md`](examples/cloudflared/ACCESS.md)
+  showing how to gate `/modelinfod` with a Cloudflare Access policy while
+  keeping the public endpoint open.
+
+The short version:
 
 ```nginx
 location = /v1/model/info { proxy_pass http://127.0.0.1:8080; }

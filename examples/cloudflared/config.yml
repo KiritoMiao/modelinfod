@@ -1,0 +1,34 @@
+# Example cloudflared tunnel config fronting an LLM gateway + modelinfod.
+#
+#   client ──> Cloudflare edge ──> cloudflared ──┬── /v1/model/info, /model/info ──> modelinfod (:8080)
+#                                                ├── /modelinfod/*               ──> modelinfod (:8080)
+#                                                └── everything else             ──> LLM gateway (:4000)
+#
+# Install as /etc/cloudflared/config.yml (or use a remotely-managed tunnel and
+# mirror these rules as Public Hostnames; the regexes below go in each route's
+# "Path" field). Ingress rules are evaluated top to bottom, first match wins;
+# the `path` field is a Go regular expression matched against the URL path.
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  # Public model metadata (no auth by design; keys live a layer above).
+  - hostname: llm.example.com
+    path: ^/(v1/)?model/info$
+    service: http://localhost:8080
+
+  # Admin panel + admin API. Protect this path with Cloudflare Access —
+  # see ACCESS.md next to this file. The SPA, its assets and the REST API
+  # all live under /modelinfod.
+  - hostname: llm.example.com
+    path: ^/modelinfod(/.*)?$
+    service: http://localhost:8080
+
+  # Everything else on the hostname: the actual LLM gateway
+  # (/v1/chat/completions, /v1/models, /v1/embeddings, ...).
+  - hostname: llm.example.com
+    service: http://localhost:4000
+
+  # Required catch-all.
+  - service: http_status:404
