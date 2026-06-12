@@ -1,0 +1,11 @@
+{
+  "model_name": "mimo-v2-omni",
+  "base_model": "mimo-v2.5",
+  "model_info": {
+    "max_input_tokens": 262144,
+    "max_tokens": 262144,
+    "supports_audio_input": true,
+    "supports_audio_output": true,
+    "supported_modalities": ["text", "image", "audio", "video"]
+  }
+}

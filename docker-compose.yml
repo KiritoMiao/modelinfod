@@ -1,0 +1,17 @@
+services:
+  modelinfod:
+    build: .
+    container_name: modelinfod
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8080}:8080"
+    volumes:
+      - modelinfod-data:/data
+      # Per-model override files, tracked in this repo so they are easy to
+      # share between deployments (matches the default OVERRIDES_DIR).
+      - ./overrides:/data/overrides
+
+volumes:
+  modelinfod-data:

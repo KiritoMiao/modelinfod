@@ -1,0 +1,4 @@
+{
+  "model_name": "gpt-pro/gpt-5.3-codex-spark",
+  "base_model": "gpt-5.3-codex-spark"
+}

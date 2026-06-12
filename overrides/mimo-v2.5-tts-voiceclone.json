@@ -1,0 +1,9 @@
+{
+  "model_name": "mimo-v2.5-tts-voiceclone",
+  "model_info": {
+    "litellm_provider": "xiaomi",
+    "mode": "audio_speech",
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0
+  }
+}

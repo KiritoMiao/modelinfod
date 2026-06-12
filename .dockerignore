@@ -1,0 +1,14 @@
+.git
+.claude
+.omc
+catalyst-ui-kit.zip
+catalyst-ui-kit/
+frontend/node_modules
+frontend/dist
+backend/.venv
+backend/tests
+data/
+.env
+**/__pycache__
+**/.pytest_cache
+**/.DS_Store
