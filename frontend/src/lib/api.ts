@@ -13,6 +13,7 @@ export interface ModelEntry {
   _admin?: {
     hidden: boolean
     override: Override | null
+    override_inherited_from: string | null // bare model name supplying the override
     is_custom: boolean
     in_upstream: boolean
     manual_match: string | null // "litellm:<key>" | "openrouter:<id>"

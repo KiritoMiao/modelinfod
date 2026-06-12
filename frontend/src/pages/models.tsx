@@ -162,6 +162,14 @@ export default function ModelsPage() {
                     {admin?.override && Object.keys(admin.override).length > 0 && (
                       <Badge color="purple">override</Badge>
                     )}
+                    {admin?.override_inherited_from && (
+                      <Badge
+                        color="violet"
+                        title={`Uses ${admin.override_inherited_from}'s override; edit to give this id its own`}
+                      >
+                        via {admin.override_inherited_from}
+                      </Badge>
+                    )}
                     {admin?.manual_match && (
                       <Badge color="sky" title={admin.manual_match}>
                         matched

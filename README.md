@@ -78,6 +78,14 @@ The example above yields "gpt-5.5-fast = gpt-5.5 at 2.5× price", and keeps
 tracking gpt-5.5's metadata as catalogs refresh. The same fields are
 editable in the panel's override dialog; saving writes the file for you.
 
+**Provider prefixes share config.** In ids like `vendor/name` or
+`a/b/name`, only the text after the last `/` is the model name proper.
+A prefixed id with no override (or manual match) of its own automatically
+uses the bare name's — so the `gpt-5.5-fast.json` above also covers
+`gpt-pro/gpt-5.5-fast`, `whatever/gpt-5.5-fast`, etc. Such rows show a
+`via <name>` badge in the panel; saving an override directly on the
+prefixed id forks it away from the shared one.
+
 ## Quick start
 
 ```sh

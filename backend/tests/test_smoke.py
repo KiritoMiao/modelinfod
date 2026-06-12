@@ -349,6 +349,65 @@ def test_file_overrides_base_model_and_multiplier(client, tmp_path):
     assert "gpt-5.5-fast" not in names
 
 
+def test_prefixed_ids_inherit_bare_name_config(client):
+    import app.main
+
+    app.main.app.state.openrouter._set_models([OPENROUTER_SAMPLE])
+
+    # Three upstream spellings of the same model, via custom models.
+    for n in ("the-model", "prov/the-model", "a/b/the-model"):
+        client.post(
+            "/modelinfod/api/custom-models",
+            json={"model_name": n, "litellm_params": {}, "model_info": {}},
+        )
+
+    # One override on the bare name covers every prefixed variant.
+    client.put(
+        "/modelinfod/api/models/the-model/override",
+        json={"base_model": "gpt-4o", "cost_multiplier": 2.0},
+    )
+
+    def fetch(name):
+        return {
+            e["model_name"]: e for e in client.get("/v1/model/info").json()["data"]
+        }[name]["model_info"]
+
+    base_in = fetch("gpt-4o")["input_cost_per_token"]
+    for n in ("the-model", "prov/the-model", "a/b/the-model"):
+        info = fetch(n)
+        assert info["base_model"] == "gpt-4o", n
+        assert info["input_cost_per_token"] == base_in * 2.0, n
+
+    # A direct override on the prefixed id wins over the inherited one.
+    client.put(
+        "/modelinfod/api/models/prov/the-model/override",
+        json={"base_model": "gpt-4o", "cost_multiplier": 5.0},
+    )
+    assert fetch("prov/the-model")["input_cost_per_token"] == base_in * 5.0
+    assert fetch("a/b/the-model")["input_cost_per_token"] == base_in * 2.0  # unchanged
+
+    # Admin annotation distinguishes own vs inherited override.
+    admin = {
+        e["model_name"]: e["_admin"]
+        for e in client.get("/modelinfod/api/models").json()["data"]
+    }
+    assert admin["prov/the-model"]["override"] is not None
+    assert admin["prov/the-model"]["override_inherited_from"] is None
+    assert admin["a/b/the-model"]["override"] is None
+    assert admin["a/b/the-model"]["override_inherited_from"] == "the-model"
+
+    # Manual matches inherit the same way: bare name's match applies to
+    # prefixed ids that have none of their own.
+    client.put(
+        "/modelinfod/api/models/the-model/match",
+        json={"source": "openrouter", "key": "vendorx/super-model"},
+    )
+    client.delete("/modelinfod/api/models/the-model/override")
+    client.delete("/modelinfod/api/models/prov/the-model/override")
+    assert fetch("a/b/the-model")["key"] == "vendorx/super-model"
+    assert fetch("a/b/the-model")["metadata_source"] == "openrouter"
+
+
 def test_legacy_override_migration(tmp_path, monkeypatch, httpx_mock_models):
     import json as _json
 

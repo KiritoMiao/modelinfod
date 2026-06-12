@@ -12,6 +12,11 @@ model): admin manual match -> LiteLLM map (auto) -> OpenRouter catalog
 (auto). On top of that baseline, in order: the override's `base_model`
 swap, custom-model fields, the override's `cost_multiplier`, and finally
 the override's explicit `model_info` fields.
+
+Provider-prefixed ids share config: for "vendor/name" (or "a/b/name"),
+the text after the last "/" is the model name proper, so a model with no
+override/manual match of its own inherits the bare name's. A direct entry
+for the full prefixed id always wins over the inherited one.
 """
 
 import hashlib
@@ -58,9 +63,36 @@ class Catalog:
         self.openrouter = openrouter
         self.overrides = overrides
 
+    def _effective_override(self, model_name: str) -> dict[str, Any] | None:
+        """Override for this exact id, else the bare model name's.
+
+        "vendor/name" / "a/b/name" are provider-prefixed spellings of "name";
+        only the text after the last "/" is the model name proper, so one
+        override file covers every prefixed variant unless a variant has its
+        own.
+        """
+        override = self.overrides.get(model_name)
+        if override is not None:
+            return override
+        bare = model_name.rsplit("/", 1)[-1]
+        if bare != model_name:
+            return self.overrides.get(bare)
+        return None
+
+    def _effective_manual_ref(self, model_name: str) -> str | None:
+        """Manual match for this exact id, else the bare model name's."""
+        manual: dict[str, str] = self.store.state["manual_matches"]
+        ref = manual.get(model_name)
+        if ref is not None:
+            return ref
+        bare = model_name.rsplit("/", 1)[-1]
+        if bare != model_name:
+            return manual.get(bare)
+        return None
+
     def _auto_baseline(self, model_name: str) -> dict[str, Any]:
         """Manual match -> litellm -> openrouter metadata for one name."""
-        manual_ref = self.store.state["manual_matches"].get(model_name)
+        manual_ref = self._effective_manual_ref(model_name)
         if manual_ref:
             entry, src, key = resolve_manual_match(
                 manual_ref, self.litellm_map, self.openrouter
@@ -88,7 +120,7 @@ class Catalog:
         own auto baseline, so a config mistake degrades predictably instead
         of inheriting another cycle member's partial data.
         """
-        override = self.overrides.get(model_name)
+        override = self._effective_override(model_name)
 
         info: dict[str, Any] = {}
         poisoned = False
@@ -179,9 +211,15 @@ class Catalog:
         upstream = set(state["upstream_models"])
         for e in entries:
             n = e["model_name"]
+            own = self.overrides.get(n)
+            bare = n.rsplit("/", 1)[-1]
+            inherited_from = (
+                bare if own is None and bare != n and self.overrides.get(bare) else None
+            )
             e["_admin"] = {
                 "hidden": n in hidden,
-                "override": self.overrides.get(n),
+                "override": own,
+                "override_inherited_from": inherited_from,
                 "is_custom": n in custom,
                 "in_upstream": n in upstream,
                 "manual_match": manual.get(n),
