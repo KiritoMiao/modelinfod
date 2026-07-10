@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     # How often to re-fetch the upstream model list (seconds, 0 disables).
     sync_interval_seconds: int = 300
 
+    # /v1/model/info validates each caller's API key against the upstream
+    # /v1/models and only returns the models that key can access. Successful
+    # per-key lookups are cached for this long (seconds, 0 = check upstream
+    # on every request).
+    user_models_cache_ttl_seconds: int = 60
+
     # LiteLLM community price/metadata map refresh.
     prices_refresh_url: str = (
         "https://raw.githubusercontent.com/BerriAI/litellm/main/"

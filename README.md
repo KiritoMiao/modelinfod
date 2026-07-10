@@ -13,15 +13,19 @@ client ──> nginx / cloudflared ──┬──> your LLM gateway   (/v1/chat
                                  └──> modelinfod         (/v1/model/info, /modelinfod)
 ```
 
-The fronting proxy handles TLS, routing and API-key enforcement.
-`/v1/model/info` is intentionally **unauthenticated** here — model metadata is
-not sensitive and keys are validated a layer above.
+The fronting proxy handles TLS and routing. `/v1/model/info` **requires the
+caller's API key**: modelinfod replays the `Authorization` header against the
+upstream `/v1/models`, so the upstream decides both whether the key is valid
+and which models it may access — the response is filtered to exactly that
+per-key list (metadata still comes from modelinfod's enriched catalog).
+Successful lookups are cached for `USER_MODELS_CACHE_TTL_SECONDS` (default
+60s, keyed by a hash of the header); rejected keys are never cached.
 
 ## Endpoints
 
 | Path | What |
 | --- | --- |
-| `GET /v1/model/info` (alias `GET /model/info`) | LiteLLM-style model list: `{"data": [{"model_name", "litellm_params", "model_info"}]}`. Supports `?litellm_model_id=<name>`. |
+| `GET /v1/model/info` (alias `GET /model/info`) | LiteLLM-style model list for the presented API key: `{"data": [{"model_name", "litellm_params", "model_info"}]}`. Requires `Authorization: Bearer <key>` (validated against the upstream). Supports `?litellm_model_id=<name>`. |
 | `GET /healthz` | Liveness + model count. |
 | `GET /modelinfod` | Admin panel (Catalyst/Tailwind SPA). |
 | `/modelinfod/api/*` | Admin REST API (optionally guarded by `ADMIN_TOKEN`). |
@@ -92,7 +96,8 @@ prefixed id forks it away from the shared one.
 cp .env.example .env   # set UPSTREAM_BASE_URL + UPSTREAM_API_KEY
 docker compose up -d --build
 
-curl localhost:8080/v1/model/info | jq '.data[0]'
+# use one of your gateway's API keys; the list is filtered to what it can access
+curl -H "Authorization: Bearer sk-..." localhost:8080/v1/model/info | jq '.data[0]'
 open http://localhost:8080/modelinfod
 ```
 

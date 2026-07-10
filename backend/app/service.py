@@ -183,13 +183,21 @@ class Catalog:
         }
 
     def build(
-        self, *, include_hidden: bool = False, name: str | None = None
+        self,
+        *,
+        include_hidden: bool = False,
+        name: str | None = None,
+        allowed: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """Entries for the full catalog, or — when `allowed` is given — for
+        the caller's per-key upstream model list. Custom models are always
+        appended: they exist because the upstream doesn't list them, so the
+        upstream can't grant them per key; a validated key sees them all."""
         state = self.store.state
         custom: dict[str, Any] = state["custom_models"]
         hidden: set[str] = set(state["hidden"])
 
-        names: list[str] = list(state["upstream_models"])
+        names = list(allowed) if allowed is not None else list(state["upstream_models"])
         seen = set(names)
         names.extend(m for m in custom if m not in seen)
 

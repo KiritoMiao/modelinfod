@@ -13,7 +13,9 @@ tunnel: <TUNNEL_ID>
 credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
 
 ingress:
-  # Public model metadata (no auth by design; keys live a layer above).
+  # Model metadata. modelinfod validates the caller's Authorization header
+  # against the gateway's /v1/models and filters the list to that key's
+  # models, so no extra Access policy is needed on this path.
   - hostname: llm.example.com
     path: ^/(v1/)?model/info$
     service: http://localhost:8080

@@ -7,6 +7,13 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Keys the fake upstream recognizes. FULL_KEY sees the whole catalog (tests
+# append to its list as they add custom models), LIMITED_KEY only one model,
+# BOOM_KEY simulates an unreachable upstream. Anything else is rejected.
+FULL_KEY = "Bearer sk-full"
+LIMITED_KEY = "Bearer sk-limited"
+BOOM_KEY = "Bearer sk-boom"
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch, httpx_mock_models):
@@ -15,29 +22,50 @@ def client(tmp_path, monkeypatch, httpx_mock_models):
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("PRICES_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("OPENROUTER_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("USER_MODELS_CACHE_TTL_SECONDS", "0")
 
     import app.config
     import app.main
 
     app.config.get_settings.cache_clear()
     importlib.reload(app.main)
-    with TestClient(app.main.app) as c:
+    with TestClient(app.main.app, headers={"Authorization": FULL_KEY}) as c:
         yield c
     app.config.get_settings.cache_clear()
 
 
 @pytest.fixture()
 def httpx_mock_models(monkeypatch):
+    import httpx
+
+    import app.routers.public
     import app.upstream
+    from app.upstream import UpstreamAuthError
 
     async def fake_fetch(settings):
         return ["gpt-4o", "claude-3-5-sonnet-20240620", "my-private-model"]
 
+    key_models = {
+        FULL_KEY: ["gpt-4o", "claude-3-5-sonnet-20240620", "my-private-model"],
+        LIMITED_KEY: ["gpt-4o"],
+    }
+    calls: list[str] = []
+
+    async def fake_for_key(settings, authorization, client):
+        calls.append(authorization)
+        if authorization == BOOM_KEY:
+            raise httpx.ConnectError("upstream down")
+        if authorization not in key_models:
+            raise UpstreamAuthError(401)
+        return list(key_models[authorization])
+
     monkeypatch.setattr(app.upstream, "fetch_upstream_models", fake_fetch)
-    # main.py imported the symbol directly too
+    # main.py / public.py imported the symbols directly too
     import app.main
 
     monkeypatch.setattr(app.main, "fetch_upstream_models", fake_fetch, raising=False)
+    monkeypatch.setattr(app.routers.public, "fetch_models_for_key", fake_for_key)
+    return {"key_models": key_models, "calls": calls}
 
 
 def test_model_info_merges_litellm_metadata(client):
@@ -430,7 +458,7 @@ def test_legacy_override_migration(tmp_path, monkeypatch, httpx_mock_models):
 
     app.config.get_settings.cache_clear()
     importlib.reload(app.main)
-    with TestClient(app.main.app) as c:
+    with TestClient(app.main.app, headers={"Authorization": FULL_KEY}) as c:
         info = {
             e["model_name"]: e for e in c.get("/v1/model/info").json()["data"]
         }["gpt-4o"]["model_info"]
@@ -443,6 +471,104 @@ def test_legacy_override_migration(tmp_path, monkeypatch, httpx_mock_models):
     files = list((tmp_path / "overrides").glob("*.json"))
     assert len(files) == 1
     assert _json.loads(files[0].read_text())["model_name"] == "gpt-4o"
+
+
+def test_model_info_requires_valid_key(client, httpx_mock_models):
+    # No Authorization header at all -> 401.
+    resp = client.get("/v1/model/info", headers={"Authorization": ""})
+    assert resp.status_code == 401
+    # A key the upstream rejects -> 401.
+    resp = client.get("/v1/model/info", headers={"Authorization": "Bearer sk-wrong"})
+    assert resp.status_code == 401
+    # Upstream unreachable -> 502, not an empty (or full) list.
+    resp = client.get("/v1/model/info", headers={"Authorization": BOOM_KEY})
+    assert resp.status_code == 502
+    # healthz stays open.
+    assert client.get("/healthz", headers={"Authorization": ""}).status_code == 200
+
+
+def test_model_info_filters_to_key_permissions(client, httpx_mock_models):
+    full = client.get("/v1/model/info").json()["data"]
+    assert {e["model_name"] for e in full} == {
+        "gpt-4o",
+        "claude-3-5-sonnet-20240620",
+        "my-private-model",
+    }
+
+    limited = client.get(
+        "/v1/model/info", headers={"Authorization": LIMITED_KEY}
+    ).json()["data"]
+    assert [e["model_name"] for e in limited] == ["gpt-4o"]
+    # metadata still resolves for the filtered view
+    assert limited[0]["model_info"]["litellm_provider"] == "openai"
+
+    # the filter param composes with the per-key list
+    only = client.get(
+        "/v1/model/info",
+        params={"litellm_model_id": "my-private-model"},
+        headers={"Authorization": LIMITED_KEY},
+    ).json()["data"]
+    assert only == []
+
+    # hidden models stay hidden even when the key is allowed them
+    client.put("/modelinfod/api/models/gpt-4o/hidden", json={"hidden": True})
+    limited = client.get(
+        "/v1/model/info", headers={"Authorization": LIMITED_KEY}
+    ).json()["data"]
+    assert limited == []
+
+
+def test_per_key_models_cache(tmp_path, monkeypatch, httpx_mock_models):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("UPSTREAM_BASE_URL", "http://upstream.test")
+    monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("PRICES_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("OPENROUTER_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("USER_MODELS_CACHE_TTL_SECONDS", "60")
+
+    import app.config
+    import app.main
+
+    app.config.get_settings.cache_clear()
+    importlib.reload(app.main)
+    calls = httpx_mock_models["calls"]
+    with TestClient(app.main.app, headers={"Authorization": FULL_KEY}) as c:
+        assert c.get("/v1/model/info").status_code == 200
+        assert c.get("/v1/model/info").status_code == 200
+        assert calls.count(FULL_KEY) == 1  # second hit came from the cache
+
+        # rejected keys are never cached: every attempt goes upstream
+        for _ in range(2):
+            assert (
+                c.get(
+                    "/v1/model/info", headers={"Authorization": "Bearer sk-wrong"}
+                ).status_code
+                == 401
+            )
+        assert calls.count("Bearer sk-wrong") == 2
+    app.config.get_settings.cache_clear()
+
+
+def test_per_key_cache_unit():
+    from app.upstream import PerKeyModelsCache
+
+    cache = PerKeyModelsCache(ttl_seconds=60, max_entries=2)
+    cache.set("Bearer a", ["m1"])
+    assert cache.get("Bearer a") == ["m1"]
+    assert cache.get("Bearer b") is None
+    # raw keys never stored, only hashes
+    assert "Bearer a" not in repr(cache._entries)
+
+    # bounded: inserting past max_entries evicts rather than growing
+    cache.set("Bearer b", ["m2"])
+    cache.set("Bearer c", ["m3"])
+    assert len(cache._entries) <= 2
+    assert cache.get("Bearer c") == ["m3"]
+
+    # ttl 0 disables caching entirely
+    off = PerKeyModelsCache(ttl_seconds=0)
+    off.set("Bearer a", ["m1"])
+    assert off.get("Bearer a") is None
 
 
 def test_provider_prefix_lookup(client):

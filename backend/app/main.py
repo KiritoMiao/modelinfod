@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +14,7 @@ from .openrouter import OpenRouterCatalog
 from .overrides import OverridesStore, normalize_override
 from .routers import admin, public
 from .store import Store
-from .upstream import fetch_upstream_models
+from .upstream import PerKeyModelsCache, fetch_upstream_models
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ async def lifespan(app: FastAPI):
     app.state.openrouter = OpenRouterCatalog(settings.data_dir)
     app.state.openrouter.load_cached()
     app.state.overrides = OverridesStore(settings.overrides_path)
+    app.state.user_models_cache = PerKeyModelsCache(settings.user_models_cache_ttl_seconds)
+    app.state.upstream_client = httpx.AsyncClient(timeout=30)
 
     # One-time migration: overrides used to live inside state.json.
     legacy = app.state.store.pop_legacy_overrides()
@@ -98,6 +101,7 @@ async def lifespan(app: FastAPI):
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.upstream_client.aclose()
 
 
 app = FastAPI(title="modelinfod", lifespan=lifespan, docs_url=None, redoc_url=None)

@@ -1,9 +1,10 @@
 # Cloudflare Access policy for the admin panel
 
 Cloudflare Access sits at the edge, in front of the tunnel, and is the right
-place to gate `/modelinfod` when you publish through cloudflared. The public
-`/v1/model/info` route stays open; inference API-key checks remain the
-gateway's job.
+place to gate `/modelinfod` when you publish through cloudflared. The
+`/v1/model/info` route needs no Access policy: modelinfod validates each
+caller's API key against the gateway's `/v1/models` and only returns the
+models that key can access.
 
 ## Self-hosted application (Zero Trust dashboard)
 
