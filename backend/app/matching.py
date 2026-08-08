@@ -16,11 +16,36 @@ def norm_tight(s: str) -> str:
     return re.sub(r"[-_.]", "", s.lower())
 
 
+# model_info values that nest further cost fields inside them. They are
+# walked recursively so a cost_multiplier or a ":free" tag reaches the
+# context-tier and priority-tier prices too, instead of silently rescaling
+# only the top-level ones.
+NESTED_PRICING_KEYS = ("tiered_pricing", "priority_pricing")
+
+
+def _map_nested_costs(value: Any, fn: Any) -> Any:
+    """Apply `fn` to every numeric cost field inside a nested pricing value."""
+    if isinstance(value, list):
+        return [_map_nested_costs(v, fn) for v in value]
+    if isinstance(value, dict):
+        return {
+            k: (
+                fn(v)
+                if "cost" in k and isinstance(v, (int, float)) and not isinstance(v, bool)
+                else _map_nested_costs(v, fn)
+            )
+            for k, v in value.items()
+        }
+    return value
+
+
 def zero_costs(entry: dict[str, Any]) -> dict[str, Any]:
     """Return a copy with all cost fields zeroed (for free model variants)."""
     out: dict[str, Any] = {}
     for k, v in entry.items():
-        if "cost" in k:
+        if k in NESTED_PRICING_KEYS:
+            out[k] = _map_nested_costs(v, lambda _: 0.0)
+        elif "cost" in k:
             if isinstance(v, (int, float)):
                 out[k] = 0.0
             # non-numeric cost structures are dropped for free variants
@@ -33,7 +58,9 @@ def scale_costs(entry: dict[str, Any], factor: float) -> dict[str, Any]:
     """Return a copy with all numeric cost fields multiplied by `factor`."""
     out: dict[str, Any] = {}
     for k, v in entry.items():
-        if "cost" in k and isinstance(v, (int, float)) and not isinstance(v, bool):
+        if k in NESTED_PRICING_KEYS:
+            out[k] = _map_nested_costs(v, lambda c: c * factor)
+        elif "cost" in k and isinstance(v, (int, float)) and not isinstance(v, bool):
             out[k] = v * factor
         else:
             out[k] = v

@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     openrouter_models_url: str = "https://openrouter.ai/api/v1/models"
     openrouter_refresh_interval_seconds: int = 86400  # 0 disables
 
+    # models.dev catalog — the primary metadata source. Covers cache pricing,
+    # context-tier pricing and the priority ("fast") service tier, none of
+    # which the other two carry reliably. No API key needed.
+    modelsdev_url: str = "https://models.dev/api.json"
+    modelsdev_refresh_interval_seconds: int = 86400  # 0 disables
+
     # Where mutable state (custom models, caches) is persisted.
     data_dir: str = "/data"
 

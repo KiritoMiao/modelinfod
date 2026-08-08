@@ -2,11 +2,13 @@
 
 A small middleware that sits next to your LLM gateway and serves a
 LiteLLM-proxy-style **`/v1/model/info`** endpoint, enriched with community
-metadata (context window, pricing, capability flags) from LiteLLM's
+metadata (context window, pricing, capability flags) from
+[models.dev](https://models.dev), LiteLLM's
 `model_prices_and_context_window.json` and, as a fallback, the OpenRouter
-model catalog. A built-in admin panel on **`/modelinfod`** lets you override
-metadata, pin a model to a specific catalog entry, hide models, and add
-custom ones.
+model catalog. Pricing covers **cache reads/writes**, **above-N-token context
+tiers** and the **priority ("fast") service tier**. A built-in admin panel on
+**`/modelinfod`** lets you override metadata, pin a model to a specific
+catalog entry, hide models, and add custom ones.
 
 ```
 client ──> nginx / cloudflared ──┬──> your LLM gateway   (/v1/chat/completions, /v1/models, …)
@@ -36,25 +38,88 @@ For each model id from the upstream `/v1/models` (re-synced every
 `SYNC_INTERVAL_SECONDS`, cached on disk so restarts keep the catalog),
 **one** metadata source is resolved — first hit wins:
 
-1. **Manual match** — a `litellm:<key>` / `openrouter:<id>` pin you set in
-   the panel ("Match metadata…"). Always wins when set.
-2. **LiteLLM map** (primary, auto) — bundled at build time, refreshed daily
+1. **Manual match** — a `modelsdev:<provider>/<id>` / `litellm:<key>` /
+   `openrouter:<id>` pin you set in the panel ("Match metadata…"). Always
+   wins when set.
+2. **models.dev** (primary, auto) — `models.dev/api.json`, refreshed daily,
+   converted to litellm-style fields (its per-1M prices become per-token).
+   The only source that reliably carries cache, context-tier and priority
+   pricing. See below for how a provider is chosen.
+3. **LiteLLM map** (secondary, auto) — bundled at build time, refreshed daily
    from GitHub. Name matching strips `:free`/`:tag` and `-YYYYMMDD` suffixes,
    tries provider-qualified spellings (`kimi-k2.5` → `moonshot/kimi-k2.5`),
    and is case/separator-insensitive. Free variants get costs zeroed.
-3. **OpenRouter catalog** (secondary, auto) — `openrouter.ai/api/v1/models`,
+4. **OpenRouter catalog** (last resort, auto) — `openrouter.ai/api/v1/models`,
    refreshed daily, converted to the same litellm-style fields. Same matching
    tiers, plus unique-tail matching for vendor-renamed ids.
 
 The resolved entry's `model_info` then gets **layered on top, later wins**:
 
-4. **Custom model fields** — for models you added that the upstream doesn't list.
-5. **Override** — see below. Only the fields you set are stored; everything
+5. **Custom model fields** — for models you added that the upstream doesn't list.
+6. **Override** — see below. Only the fields you set are stored; everything
    else keeps following the resolved source (so a daily price refresh still
    flows through).
 
 `model_info.key` and `model_info.metadata_source` on each entry tell you
 which catalog entry was used.
+
+**Cache pricing is the one field group that crosses sources.** Coverage
+differs a lot between the three, so a model whose winning source has no
+cache read/write price is topped up from the best source that does, and
+`model_info.cache_cost_source` records the donor. Both fields always come
+from one donor, and manual matches are never topped up — an explicit pin is
+served exactly as pinned.
+
+### Which provider's prices models.dev uses
+
+models.dev is keyed `provider → models`, and about a third of its model ids
+are listed by several providers, each with its own price. A bare id resolves
+to the most authoritative provider that has it: first the vendors that only
+serve their own models (`openai`, `anthropic`, `moonshotai`, `xiaomi`, …),
+then first-party clouds that also resell (`alibaba`, `amazon-bedrock`,
+`azure`, `openrouter`, …). Pure re-hosts and aggregators never win a bare id
+— their pricing is specific to that host — but they are still loaded, so you
+can search for one and pin it with a manual match on its fully-qualified
+`<provider>/<id>` key.
+
+### Cache, context-tier and priority pricing
+
+Where models.dev has them, entries carry LiteLLM's own flat field names plus
+a nested object spelling out each range — so consumers that only read the
+flat fields still work:
+
+```jsonc
+{
+  "input_cost_per_token": 5e-06,
+  "cache_read_input_token_cost": 5e-07,
+  "cache_creation_input_token_cost": null,
+
+  "input_cost_per_token_above_272k_tokens": 1e-05,   // context tier
+  "input_cost_per_token_priority": 1.25e-05,         // priority tier
+  "supports_service_tier": true,
+
+  "tiered_pricing": [
+    {"range": [0, 272000],      "input_cost_per_token": 5e-06},
+    {"range": [272000, null],   "input_cost_per_token": 1e-05}
+  ],
+  "priority_pricing": {
+    "service_tier": "priority",
+    "input_cost_per_token": 1.25e-05
+  }
+}
+```
+
+A `cost_multiplier` override scales the nested objects too, so "X at 2×"
+stays consistent across every tier.
+
+**Fast/priority model ids resolve automatically.** An upstream id ending in
+`-fast`, `-priority`, `:fast` or `:priority` is served as its base model at
+the priority tier: the priority prices become the model's own costs and
+`model_info.service_tier` records the tier. It only fires when the id does
+not name a real model and the base actually publishes priority pricing, so
+genuinely-named models (`grok-code-fast-1`, `kimi-k2.6-fast`, Nebius's
+`…-fast` hardware variants) are matched normally rather than mispriced.
+This replaces hand-maintained `cost_multiplier` files for such variants.
 
 ## Overrides: one shareable JSON file per model
 
@@ -64,12 +129,12 @@ between deployments. Files dropped in or edited externally are picked up
 automatically (within ~2s); "Reload files" on the Status page forces it.
 
 ```jsonc
-// overrides/gpt-5.5-fast.json
+// overrides/my-gateway-turbo.json
 {
-  "model_name": "gpt-5.5-fast",   // authoritative (filename is just a slug)
-  "base_model": "gpt-5.5",        // optional: inherit that model's resolved info
-  "cost_multiplier": 2.5,         // optional: scale all *cost* fields
-  "model_info": {                  // optional: explicit field patches (win last)
+  "model_name": "my-gateway-turbo", // authoritative (filename is just a slug)
+  "base_model": "gpt-5.5",          // optional: inherit that model's resolved info
+  "cost_multiplier": 1.4,           // optional: scale all *cost* fields
+  "model_info": {                   // optional: explicit field patches (win last)
     "max_output_tokens": 65536
   }
 }
@@ -77,10 +142,16 @@ automatically (within ~2s); "Reload files" on the Status page forces it.
 
 Evaluation order per model: `base_model`'s fully-resolved info (recursive,
 cycle-safe) replaces the auto-matched baseline → `cost_multiplier` scales
-every numeric `*cost*` field → `model_info` fields are applied verbatim.
-The example above yields "gpt-5.5-fast = gpt-5.5 at 2.5× price", and keeps
-tracking gpt-5.5's metadata as catalogs refresh. The same fields are
-editable in the panel's override dialog; saving writes the file for you.
+every numeric `*cost*` field, including inside `tiered_pricing` and
+`priority_pricing` → `model_info` fields are applied verbatim. The example
+above yields "my-gateway-turbo = gpt-5.5 at 1.4× price", and keeps tracking
+gpt-5.5's metadata as catalogs refresh. The same fields are editable in the
+panel's override dialog; saving writes the file for you.
+
+You no longer need this pattern for `-fast` / `-priority` ids — those pick
+up their real priority prices automatically (see above). An override on such
+an id still wins, so a stale hand-written multiplier will keep shadowing the
+published price; delete the file to fall back to the catalog.
 
 **Provider prefixes share config.** In ids like `vendor/name` or
 `a/b/name`, only the text after the last `/` is the model name proper.

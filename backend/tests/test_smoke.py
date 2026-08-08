@@ -22,6 +22,7 @@ def client(tmp_path, monkeypatch, httpx_mock_models):
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("PRICES_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("OPENROUTER_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MODELSDEV_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("USER_MODELS_CACHE_TTL_SECONDS", "0")
 
     import app.config
@@ -229,6 +230,308 @@ def test_openrouter_convert_and_lookup():
     assert cat.lookup("nope-model") == (None, None)
     # search
     assert cat.search("super") == ["vendorx/super-model"]
+
+
+MODELSDEV_SAMPLE = {
+    # A preferred provider: wins bare ids.
+    "openai": {
+        "id": "openai",
+        "name": "OpenAI",
+        "models": {
+            "super-model": {
+                "id": "super-model",
+                "name": "Super Model",
+                "attachment": True,
+                "reasoning": True,
+                "tool_call": True,
+                "structured_output": True,
+                "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]},
+                "limit": {"context": 400000, "input": 380000, "output": 64000},
+                "cost": {
+                    "input": 3,
+                    "output": 15,
+                    "cache_read": 0.3,
+                    "cache_write": 3.75,
+                    "tiers": [
+                        {
+                            "input": 6,
+                            "output": 22.5,
+                            "cache_read": 0.6,
+                            "tier": {"type": "context", "size": 272000},
+                        }
+                    ],
+                },
+                "experimental": {
+                    "modes": {
+                        # Priced -> becomes the priority tier.
+                        "fast": {
+                            "cost": {"input": 7.5, "output": 37.5, "cache_read": 0.75},
+                            "provider": {"body": {"service_tier": "priority"}},
+                        },
+                        # Unpriced -> ignored.
+                        "pro": {"provider": {"body": {"reasoning": {"mode": "pro"}}}},
+                    }
+                },
+            },
+            # No cache pricing of its own; the LiteLLM map does price gpt-4o's
+            # cache reads, so the merge layer must top this up from there.
+            "gpt-4o": {
+                "id": "gpt-4o",
+                "name": "GPT-4o via models.dev",
+                "tool_call": True,
+                "modalities": {"input": ["text"], "output": ["text"]},
+                "limit": {"context": 128000, "output": 16384},
+                "cost": {"input": 2.5, "output": 10},
+            },
+            # Genuinely named "-fast": a model, not a service tier.
+            "quick-model-fast": {
+                "id": "quick-model-fast",
+                "name": "Quick Model Fast",
+                "modalities": {"input": ["text"], "output": ["text"]},
+                "limit": {"context": 8000, "output": 4000},
+                "cost": {"input": 1, "output": 2},
+            },
+        },
+    },
+    # Not a preferred provider: loaded and pinnable, but never wins a bare id.
+    "poe": {
+        "id": "poe",
+        "models": {
+            "super-model": {
+                "id": "super-model",
+                "name": "Super Model, resold",
+                "modalities": {"input": ["text"], "output": ["text"]},
+                "limit": {"context": 400000, "output": 64000},
+                "cost": {"input": 99, "output": 99},
+            }
+        },
+    },
+}
+
+
+def test_modelsdev_convert_costs_tiers_and_priority():
+    from app.modelsdev import ModelsDevCatalog
+
+    cat = ModelsDevCatalog()
+    cat._set_providers(MODELSDEV_SAMPLE)
+
+    info = cat.get("openai/super-model")
+    # models.dev quotes per 1M tokens; litellm wants per token.
+    assert info["input_cost_per_token"] == 3e-6
+    assert info["output_cost_per_token"] == 15e-6
+    assert info["cache_read_input_token_cost"] == 0.3e-6
+    assert info["cache_creation_input_token_cost"] == 3.75e-6
+    assert info["supports_prompt_caching"] is True
+    # limit.input is the real input cap when it is tighter than the context
+    assert info["max_input_tokens"] == 380000
+    assert info["max_tokens"] == 400000
+    assert info["max_output_tokens"] == 64000
+
+    # Context tier: flat litellm-style fields...
+    assert info["input_cost_per_token_above_272k_tokens"] == 6e-6
+    assert info["output_cost_per_token_above_272k_tokens"] == 22.5e-6
+    assert info["cache_read_input_token_cost_above_272k_tokens"] == 0.6e-6
+    # ...and the nested array spelling out every range.
+    assert info["tiered_pricing"] == [
+        {
+            "range": [0, 272000],
+            "input_cost_per_token": 3e-6,
+            "output_cost_per_token": 15e-6,
+            "cache_read_input_token_cost": 0.3e-6,
+            "cache_creation_input_token_cost": 3.75e-6,
+        },
+        {
+            "range": [272000, None],
+            "input_cost_per_token": 6e-6,
+            "output_cost_per_token": 22.5e-6,
+            "cache_read_input_token_cost": 0.6e-6,
+        },
+    ]
+
+    # Priority tier: flat fields plus the nested object naming the tier.
+    assert info["input_cost_per_token_priority"] == 7.5e-6
+    assert info["output_cost_per_token_priority"] == 37.5e-6
+    assert info["cache_read_input_token_cost_priority"] == 0.75e-6
+    assert info["supports_service_tier"] is True
+    assert info["priority_pricing"] == {
+        "service_tier": "priority",
+        "input_cost_per_token": 7.5e-6,
+        "output_cost_per_token": 37.5e-6,
+        "cache_read_input_token_cost": 0.75e-6,
+    }
+
+    assert info["supports_vision"] is True
+    assert info["supports_pdf_input"] is True
+    assert info["supports_function_calling"] is True
+    assert info["supports_response_schema"] is True
+    assert info["litellm_provider"] == "openai"
+
+
+def test_modelsdev_provider_preference_and_fast_variants():
+    from app.modelsdev import ModelsDevCatalog
+
+    cat = ModelsDevCatalog()
+    cat._set_providers(MODELSDEV_SAMPLE)
+
+    # A bare id resolves to the preferred provider, never the reseller.
+    entry, key = cat.lookup("super-model")
+    assert key == "openai/super-model"
+    assert entry["input_cost_per_token"] == 3e-6
+    # The reseller is still loaded, searchable and pinnable by full key.
+    assert cat.get("poe/super-model")["input_cost_per_token"] == 99e-6
+    assert cat.lookup("poe/super-model")[1] == "poe/super-model"
+    assert "poe/super-model" in cat.search("super-model")
+
+    # "-fast" promotes the priority prices to the model's own.
+    entry, key = cat.lookup("super-model-fast")
+    assert key == "openai/super-model"
+    assert entry["input_cost_per_token"] == 7.5e-6
+    assert entry["output_cost_per_token"] == 37.5e-6
+    assert entry["cache_read_input_token_cost"] == 0.75e-6
+    assert entry["service_tier"] == "priority"
+    # Nothing left restating the priority price, and the standard-tier
+    # context pricing is dropped rather than under-pricing a priority model.
+    assert not [k for k in entry if k.endswith("_priority")]
+    assert "priority_pricing" not in entry
+    assert "tiered_pricing" not in entry
+    assert not [k for k in entry if "_above_" in k]
+    # ":priority" spells the same thing.
+    assert cat.lookup("super-model:priority")[0]["input_cost_per_token"] == 7.5e-6
+
+    # A model genuinely named "-fast" matches itself, untouched.
+    entry, key = cat.lookup("quick-model-fast")
+    assert key == "openai/quick-model-fast"
+    assert entry["input_cost_per_token"] == 1e-6
+    assert "service_tier" not in entry
+
+    # A base with no priority tier is never promoted...
+    assert cat.lookup("gpt-4o-fast") == (None, None)
+    # ...and neither is an id with no base at all.
+    assert cat.lookup("nothing-here-fast") == (None, None)
+
+    # The source entry is never mutated by promotion or by ":free" zeroing.
+    assert cat.lookup("super-model:free")[0]["input_cost_per_token"] == 0.0
+    assert cat.get("openai/super-model")["input_cost_per_token"] == 3e-6
+
+
+def test_free_and_multiplier_reach_nested_pricing():
+    """`tiered_pricing` / `priority_pricing` are nested, so the cost helpers
+    have to recurse or a multiplier would silently miss them."""
+    from app.matching import scale_costs, zero_costs
+    from app.modelsdev import ModelsDevCatalog
+
+    cat = ModelsDevCatalog()
+    cat._set_providers(MODELSDEV_SAMPLE)
+    entry = cat.get("openai/super-model")
+
+    scaled = scale_costs(entry, 2.0)
+    assert scaled["input_cost_per_token"] == 6e-6
+    assert scaled["tiered_pricing"][1]["input_cost_per_token"] == 12e-6
+    assert scaled["priority_pricing"]["input_cost_per_token"] == 15e-6
+    # Non-cost members of the nested objects survive untouched.
+    assert scaled["tiered_pricing"][1]["range"] == [272000, None]
+    assert scaled["priority_pricing"]["service_tier"] == "priority"
+
+    zeroed = zero_costs(entry)
+    assert zeroed["input_cost_per_token"] == 0.0
+    assert zeroed["tiered_pricing"][0]["input_cost_per_token"] == 0.0
+    assert zeroed["priority_pricing"]["output_cost_per_token"] == 0.0
+    assert zeroed["priority_pricing"]["service_tier"] == "priority"
+    assert entry["priority_pricing"]["input_cost_per_token"] == 7.5e-6  # unmutated
+
+
+def test_modelsdev_is_primary_source_and_tops_up_cache_costs(client):
+    import app.main
+
+    app.main.app.state.modelsdev._set_providers(MODELSDEV_SAMPLE)
+
+    def fetch(name):
+        return {
+            e["model_name"]: e for e in client.get("/v1/model/info").json()["data"]
+        }[name]["model_info"]
+
+    # models.dev outranks the LiteLLM map for a model both describe.
+    gpt = fetch("gpt-4o")
+    assert gpt["metadata_source"] == "modelsdev"
+    assert gpt["key"] == "openai/gpt-4o"
+    assert gpt["input_cost_per_token"] == 2.5e-6
+
+    # models.dev has no cache price for it, but litellm does: the gap is
+    # filled from there rather than left empty, and the donor is recorded.
+    assert gpt["cache_read_input_token_cost"] == 1.25e-6
+    assert gpt["cache_cost_source"] == "litellm"
+    assert gpt["supports_prompt_caching"] is True
+
+    # A source that has its own cache pricing is never topped up.
+    client.post(
+        "/modelinfod/api/custom-models",
+        json={"model_name": "super-model", "litellm_params": {}, "model_info": {}},
+    )
+    sup = fetch("super-model")
+    assert sup["metadata_source"] == "modelsdev"
+    assert sup["cache_read_input_token_cost"] == 0.3e-6
+    assert "cache_cost_source" not in sup
+
+    # A "-fast" upstream id gets the priority prices end to end.
+    client.post(
+        "/modelinfod/api/custom-models",
+        json={"model_name": "super-model-fast", "litellm_params": {}, "model_info": {}},
+    )
+    fast = fetch("super-model-fast")
+    assert fast["input_cost_per_token"] == 7.5e-6
+    assert fast["service_tier"] == "priority"
+    assert fast["id"] != sup["id"]  # identity stays the model's own
+
+    # models.dev is pinnable, including at a reseller's key.
+    assert (
+        client.put(
+            "/modelinfod/api/models/my-private-model/match",
+            json={"source": "modelsdev", "key": "poe/super-model"},
+        ).status_code
+        == 200
+    )
+    mine = fetch("my-private-model")
+    assert mine["metadata_source"] == "modelsdev"
+    assert mine["input_cost_per_token"] == 99e-6
+
+    # Status and the search picker both cover the new source.
+    status = client.get("/modelinfod/api/status").json()
+    assert status["modelsdev_entries"] == 4
+    res = client.get(
+        "/modelinfod/api/metadata-keys", params={"q": "super-model"}
+    ).json()["data"]
+    assert {r["key"] for r in res if r["source"] == "modelsdev"} == {
+        "openai/super-model",
+        "poe/super-model",
+    }
+
+
+def test_cost_multiplier_scales_a_models_dev_baseline(client):
+    """The override layer and the nested pricing objects have to compose:
+    "X at 2x" must scale the tier and priority prices too."""
+    import app.main
+
+    app.main.app.state.modelsdev._set_providers(MODELSDEV_SAMPLE)
+    client.post(
+        "/modelinfod/api/custom-models",
+        json={"model_name": "resold-super", "litellm_params": {}, "model_info": {}},
+    )
+    client.put(
+        "/modelinfod/api/models/resold-super/override",
+        json={"base_model": "super-model", "cost_multiplier": 2.0},
+    )
+    info = {
+        e["model_name"]: e for e in client.get("/v1/model/info").json()["data"]
+    }["resold-super"]["model_info"]
+
+    assert info["input_cost_per_token"] == 6e-6
+    assert info["cache_read_input_token_cost"] == 0.6e-6
+    assert info["cache_creation_input_token_cost"] == 7.5e-6
+    assert info["input_cost_per_token_above_272k_tokens"] == 12e-6
+    assert info["input_cost_per_token_priority"] == 15e-6
+    assert info["tiered_pricing"][1]["input_cost_per_token"] == 12e-6
+    assert info["priority_pricing"]["input_cost_per_token"] == 15e-6
+    assert info["priority_pricing"]["service_tier"] == "priority"
 
 
 def test_openrouter_fallback_and_manual_match(client):
@@ -452,6 +755,7 @@ def test_legacy_override_migration(tmp_path, monkeypatch, httpx_mock_models):
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("PRICES_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("OPENROUTER_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MODELSDEV_REFRESH_INTERVAL_SECONDS", "0")
 
     import app.config
     import app.main
@@ -524,6 +828,7 @@ def test_per_key_models_cache(tmp_path, monkeypatch, httpx_mock_models):
     monkeypatch.setenv("SYNC_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("PRICES_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("OPENROUTER_REFRESH_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MODELSDEV_REFRESH_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("USER_MODELS_CACHE_TTL_SECONDS", "60")
 
     import app.config
