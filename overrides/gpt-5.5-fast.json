@@ -1,5 +1,0 @@
-{
-  "model_name": "gpt-5.5-fast",
-  "base_model": "gpt-5.5",
-  "cost_multiplier": 2.5
-}
