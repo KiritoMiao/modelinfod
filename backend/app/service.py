@@ -8,10 +8,15 @@ LiteLLM-proxy-style /v1/model/info entries:
     }
 
 Metadata resolution order for each model (first hit wins, one source per
-model): admin manual match -> LiteLLM map (auto) -> OpenRouter catalog
-(auto). On top of that baseline, in order: the override's `base_model`
-swap, custom-model fields, the override's `cost_multiplier`, and finally
-the override's explicit `model_info` fields.
+model): admin manual match -> models.dev (auto) -> LiteLLM map (auto) ->
+OpenRouter catalog (auto). On top of that baseline, in order: the
+override's `base_model` swap, custom-model fields, the override's
+`cost_multiplier`, and finally the override's explicit `model_info` fields.
+
+The one exception to "one source per model" is cache pricing, whose
+coverage differs a lot per source: an auto-matched baseline carrying no
+cache read/write cost is topped up from the best source that has one, and
+marked with `cache_cost_source`.
 
 Provider-prefixed ids share config: for "vendor/name" (or "a/b/name"),
 the text after the last "/" is the model name proper, so a model with no
@@ -24,6 +29,7 @@ from typing import Any
 
 from .litellm_map import LiteLLMMap
 from .matching import scale_costs
+from .modelsdev import CACHE_COST_FIELDS, ModelsDevCatalog
 from .openrouter import OpenRouterCatalog
 from .overrides import OverridesStore
 from .store import Store
@@ -36,7 +42,10 @@ def _entry_id(model_name: str) -> str:
 
 
 def resolve_manual_match(
-    ref: str, litellm_map: LiteLLMMap, openrouter: OpenRouterCatalog
+    ref: str,
+    litellm_map: LiteLLMMap,
+    openrouter: OpenRouterCatalog,
+    modelsdev: ModelsDevCatalog,
 ) -> tuple[dict[str, Any] | None, str, str]:
     """Resolve a stored "source:key" ref. Keys may contain ":" themselves
     (openrouter ids like "deepseek/deepseek-chat:free"), so split once."""
@@ -45,6 +54,8 @@ def resolve_manual_match(
         return litellm_map.get(key), source, key
     if source == "openrouter":
         return openrouter.get(key), source, key
+    if source == "modelsdev":
+        return modelsdev.get(key), source, key
     return None, source, key
 
 
@@ -56,11 +67,13 @@ class Catalog:
         store: Store,
         litellm_map: LiteLLMMap,
         openrouter: OpenRouterCatalog,
+        modelsdev: ModelsDevCatalog,
         overrides: OverridesStore,
     ) -> None:
         self.store = store
         self.litellm_map = litellm_map
         self.openrouter = openrouter
+        self.modelsdev = modelsdev
         self.overrides = overrides
 
     def _effective_override(self, model_name: str) -> dict[str, Any] | None:
@@ -90,23 +103,69 @@ class Catalog:
             return manual.get(bare)
         return None
 
+    def _sources(self) -> tuple[tuple[str, Any], ...]:
+        """The auto-matched metadata sources, best first."""
+        return (
+            ("modelsdev", self.modelsdev),
+            ("litellm", self.litellm_map),
+            ("openrouter", self.openrouter),
+        )
+
+    def _with_cache_costs(
+        self, model_name: str, info: dict[str, Any], won_by: str
+    ) -> dict[str, Any]:
+        """Fill in cache read/write pricing from another source when the one
+        that won carries none.
+
+        Coverage differs a lot per source — models.dev prices caching for far
+        more models than the other two, but not for all of them, and the
+        LiteLLM map occasionally has a cache price where models.dev has none.
+        Without this, whichever source happens to win would hide the other's
+        cache pricing.
+
+        Both fields come from a single donor (mixing a read price from one
+        source with a write price from another would not describe any real
+        product) and the donor is recorded in `cache_cost_source`. Only auto
+        matches are topped up: there every source is queried with the model's
+        own id, so they all describe the same model. A manual match is an
+        explicit pin at a possibly unrelated key and is left exactly as
+        pinned.
+        """
+        if any(f in info for f in CACHE_COST_FIELDS):
+            return info
+        for name, source in self._sources():
+            if name == won_by:
+                continue
+            entry, _ = source.lookup(model_name)
+            if entry is None:
+                continue
+            costs = {f: entry[f] for f in CACHE_COST_FIELDS if f in entry}
+            if costs:
+                return {
+                    **info,
+                    **costs,
+                    "supports_prompt_caching": True,
+                    "cache_cost_source": name,
+                }
+        return info
+
     def _auto_baseline(self, model_name: str) -> dict[str, Any]:
-        """Manual match -> litellm -> openrouter metadata for one name."""
+        """Manual match -> models.dev -> litellm -> openrouter for one name."""
         manual_ref = self._effective_manual_ref(model_name)
         if manual_ref:
             entry, src, key = resolve_manual_match(
-                manual_ref, self.litellm_map, self.openrouter
+                manual_ref, self.litellm_map, self.openrouter, self.modelsdev
             )
             if entry is not None:
                 return {**entry, "key": key, "metadata_source": src}
             # Dangling ref (key dropped from a refreshed source): fall through
             # to auto matching; the admin UI still shows the stored match.
-        mapped, key = self.litellm_map.lookup(model_name)
-        if mapped is not None:
-            return {**mapped, "key": key, "metadata_source": "litellm"}
-        mapped, key = self.openrouter.lookup(model_name)
-        if mapped is not None:
-            return {**mapped, "key": key, "metadata_source": "openrouter"}
+        for name, source in self._sources():
+            mapped, key = source.lookup(model_name)
+            if mapped is not None:
+                return self._with_cache_costs(
+                    model_name, {**mapped, "key": key, "metadata_source": name}, name
+                )
         return {}
 
     def _resolve_info(
@@ -237,5 +296,9 @@ class Catalog:
 
 def get_catalog(app_state: Any) -> Catalog:
     return Catalog(
-        app_state.store, app_state.litellm_map, app_state.openrouter, app_state.overrides
+        app_state.store,
+        app_state.litellm_map,
+        app_state.openrouter,
+        app_state.modelsdev,
+        app_state.overrides,
     )

@@ -12,8 +12,19 @@ import {
 import { ErrorMessage, Field } from '../catalyst/fieldset'
 import { Input, InputGroup } from '../catalyst/input'
 import { Text } from '../catalyst/text'
-import { api, type MetadataKey, type ModelEntry } from '../lib/api'
+import {
+  api,
+  type MetadataKey,
+  type MetadataSource,
+  type ModelEntry,
+} from '../lib/api'
 import { formatCostPerMillion, formatTokens } from '../lib/format'
+
+const SOURCE_COLOR: Record<MetadataSource, 'emerald' | 'sky' | 'orange'> = {
+  modelsdev: 'emerald',
+  litellm: 'sky',
+  openrouter: 'orange',
+}
 
 interface Props {
   entry: ModelEntry | null // null = closed
@@ -21,7 +32,7 @@ interface Props {
   onSaved: () => void
 }
 
-/** Pick which litellm/openrouter entry a model's metadata comes from. */
+/** Pick which catalog entry a model's metadata comes from. */
 export function MatchDialog({ entry, onClose, onSaved }: Props) {
   const open = entry !== null
   const current = entry?._admin?.manual_match ?? null
@@ -101,9 +112,11 @@ export function MatchDialog({ entry, onClose, onSaved }: Props) {
     <Dialog open={open} onClose={onClose} size="2xl">
       <DialogTitle>Match metadata for {entry?.model_name}</DialogTitle>
       <DialogDescription>
-        Pin this model to a LiteLLM or OpenRouter catalog entry. The manual
-        match takes precedence over automatic name matching; overrides still
-        apply on top.
+        Pin this model to a models.dev, LiteLLM or OpenRouter catalog entry.
+        The manual match takes precedence over automatic name matching;
+        overrides still apply on top. models.dev keys are{' '}
+        <span className="font-mono">provider/model</span>, so pinning one also
+        picks whose prices to use.
       </DialogDescription>
       <DialogBody>
         {current && (
@@ -116,7 +129,7 @@ export function MatchDialog({ entry, onClose, onSaved }: Props) {
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search litellm keys and OpenRouter ids…"
+            placeholder="Search models.dev, litellm and OpenRouter ids…"
             autoFocus
           />
         </InputGroup>
@@ -153,11 +166,16 @@ export function MatchDialog({ entry, onClose, onSaved }: Props) {
                     {formatTokens(r.info.max_input_tokens)} ctx ·{' '}
                     {formatCostPerMillion(r.info.input_cost_per_token)} in ·{' '}
                     {formatCostPerMillion(r.info.output_cost_per_token)} out
+                    {r.info.cache_read_input_token_cost != null && (
+                      <>
+                        {' · '}
+                        {formatCostPerMillion(r.info.cache_read_input_token_cost)}{' '}
+                        cache
+                      </>
+                    )}
                   </div>
                 </div>
-                <Badge color={r.source === 'litellm' ? 'sky' : 'orange'}>
-                  {r.source}
-                </Badge>
+                <Badge color={SOURCE_COLOR[r.source]}>{r.source}</Badge>
               </button>
             )
           })}

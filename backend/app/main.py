@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .litellm_map import LiteLLMMap
+from .modelsdev import ModelsDevCatalog
 from .openrouter import OpenRouterCatalog
 from .overrides import OverridesStore, normalize_override
 from .routers import admin, public
@@ -59,6 +60,16 @@ async def _openrouter_loop(app: FastAPI, interval: int) -> None:
         await asyncio.sleep(interval)
 
 
+async def _modelsdev_loop(app: FastAPI, interval: int) -> None:
+    settings = get_settings()
+    while True:
+        try:
+            await app.state.modelsdev.refresh(settings.modelsdev_url)
+        except Exception as exc:
+            logger.warning("models.dev catalog refresh failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -67,6 +78,8 @@ async def lifespan(app: FastAPI):
     app.state.litellm_map.load_bundled()
     app.state.openrouter = OpenRouterCatalog(settings.data_dir)
     app.state.openrouter.load_cached()
+    app.state.modelsdev = ModelsDevCatalog(settings.data_dir)
+    app.state.modelsdev.load_cached()
     app.state.overrides = OverridesStore(settings.overrides_path)
     app.state.user_models_cache = PerKeyModelsCache(settings.user_models_cache_ttl_seconds)
     app.state.upstream_client = httpx.AsyncClient(timeout=30)
@@ -93,6 +106,12 @@ async def lifespan(app: FastAPI):
         tasks.append(
             asyncio.create_task(
                 _openrouter_loop(app, settings.openrouter_refresh_interval_seconds)
+            )
+        )
+    if settings.modelsdev_refresh_interval_seconds > 0:
+        tasks.append(
+            asyncio.create_task(
+                _modelsdev_loop(app, settings.modelsdev_refresh_interval_seconds)
             )
         )
     try:

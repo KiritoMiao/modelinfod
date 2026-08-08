@@ -15,7 +15,7 @@ import { Text } from '../catalyst/text'
 export default function StatusPage() {
   const [status, setStatus] = useState<StatusInfo | null>(null)
   const [busy, setBusy] = useState<
-    'sync' | 'prices' | 'openrouter' | 'overrides' | null
+    'sync' | 'prices' | 'openrouter' | 'modelsdev' | 'overrides' | null
   >(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -33,7 +33,9 @@ export default function StatusPage() {
     load()
   }, [load])
 
-  async function run(kind: 'sync' | 'prices' | 'openrouter' | 'overrides') {
+  async function run(
+    kind: 'sync' | 'prices' | 'openrouter' | 'modelsdev' | 'overrides'
+  ) {
     setBusy(kind)
     setNotice(null)
     setError(null)
@@ -44,6 +46,9 @@ export default function StatusPage() {
       } else if (kind === 'prices') {
         const r = await api.refreshPrices()
         setNotice(`Refreshed LiteLLM metadata: ${r.entries} entries.`)
+      } else if (kind === 'modelsdev') {
+        const r = await api.refreshModelsdev()
+        setNotice(`Refreshed models.dev catalog: ${r.entries} entries.`)
       } else if (kind === 'openrouter') {
         const r = await api.refreshOpenrouter()
         setNotice(`Refreshed OpenRouter catalog: ${r.entries} entries.`)
@@ -67,6 +72,13 @@ export default function StatusPage() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <Heading>Status</Heading>
         <div className="flex flex-wrap gap-2">
+          <Button
+            outline
+            disabled={busy !== null}
+            onClick={() => run('modelsdev')}
+          >
+            {busy === 'modelsdev' ? 'Refreshing…' : 'Refresh models.dev'}
+          </Button>
           <Button
             outline
             disabled={busy !== null}
@@ -162,7 +174,33 @@ export default function StatusPage() {
             <DescriptionDetails>{status.hidden_count}</DescriptionDetails>
           </DescriptionList>
 
-          <Subheading className="mt-10">LiteLLM metadata</Subheading>
+          <Subheading className="mt-10">
+            models.dev catalog
+            <span className="ml-2 text-xs font-normal text-zinc-500">
+              1st — cache, context-tier and priority pricing
+            </span>
+          </Subheading>
+          <Divider className="mt-2" />
+          <DescriptionList>
+            <DescriptionTerm>Entries</DescriptionTerm>
+            <DescriptionDetails>
+              {status.modelsdev_entries}
+              {status.modelsdev_entries === 0 && (
+                <Badge color="zinc" className="ml-2">
+                  not fetched yet
+                </Badge>
+              )}
+            </DescriptionDetails>
+            <DescriptionTerm>Last refresh</DescriptionTerm>
+            <DescriptionDetails>
+              {formatTimestamp(status.modelsdev_refreshed_at)}
+            </DescriptionDetails>
+          </DescriptionList>
+
+          <Subheading className="mt-10">
+            LiteLLM metadata
+            <span className="ml-2 text-xs font-normal text-zinc-500">2nd</span>
+          </Subheading>
           <Divider className="mt-2" />
           <DescriptionList>
             <DescriptionTerm>Entries</DescriptionTerm>
@@ -177,7 +215,10 @@ export default function StatusPage() {
             </DescriptionDetails>
           </DescriptionList>
 
-          <Subheading className="mt-10">OpenRouter catalog</Subheading>
+          <Subheading className="mt-10">
+            OpenRouter catalog
+            <span className="ml-2 text-xs font-normal text-zinc-500">3rd</span>
+          </Subheading>
           <Divider className="mt-2" />
           <DescriptionList>
             <DescriptionTerm>Entries</DescriptionTerm>

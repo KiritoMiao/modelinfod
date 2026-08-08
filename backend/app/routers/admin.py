@@ -44,7 +44,7 @@ class HiddenBody(BaseModel):
 
 
 class MatchBody(BaseModel):
-    source: str = Field(pattern="^(litellm|openrouter)$")
+    source: str = Field(pattern="^(litellm|openrouter|modelsdev)$")
     key: str = Field(min_length=1, max_length=512)
 
 
@@ -77,6 +77,8 @@ async def status(request: Request):
         "prices_source": s["prices_source"],
         "openrouter_entries": request.app.state.openrouter.size,
         "openrouter_refreshed_at": request.app.state.openrouter.refreshed_at,
+        "modelsdev_entries": request.app.state.modelsdev.size,
+        "modelsdev_refreshed_at": request.app.state.modelsdev.refreshed_at,
         "sync_interval_seconds": settings.sync_interval_seconds,
     }
 
@@ -116,11 +118,22 @@ async def refresh_openrouter(request: Request):
     return {"entries": n}
 
 
+@router.post("/refresh-modelsdev")
+async def refresh_modelsdev(request: Request):
+    settings = get_settings()
+    try:
+        n = await request.app.state.modelsdev.refresh(settings.modelsdev_url)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+    return {"entries": n}
+
+
 _SUMMARY_FIELDS = (
     "max_input_tokens",
     "max_output_tokens",
     "input_cost_per_token",
     "output_cost_per_token",
+    "cache_read_input_token_cost",
     "litellm_provider",
     "mode",
 )
@@ -136,21 +149,30 @@ def _summarize(source: str, key: str, entry: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/metadata-keys")
 async def search_metadata_keys(request: Request, q: str = "", limit: int = 30):
-    """Search both metadata sources for the manual-match picker."""
+    """Search every metadata source for the manual-match picker."""
     limit = max(1, min(limit, 100))
-    lm = request.app.state.litellm_map
-    orc = request.app.state.openrouter
-    results = [_summarize("litellm", k, lm.get(k)) for k in lm.search(q, limit)]
-    results += [_summarize("openrouter", k, orc.get(k)) for k in orc.search(q, limit)]
+    state = request.app.state
+    sources = (
+        ("modelsdev", state.modelsdev),
+        ("litellm", state.litellm_map),
+        ("openrouter", state.openrouter),
+    )
+    results = [
+        _summarize(name, k, source.get(k))
+        for name, source in sources
+        for k in source.search(q, limit)
+    ]
     return {"data": results}
 
 
 @router.put("/models/{model_name:path}/match")
 async def set_match(model_name: str, body: MatchBody, request: Request):
-    if body.source == "litellm":
-        entry = request.app.state.litellm_map.get(body.key)
-    else:
-        entry = request.app.state.openrouter.get(body.key)
+    source = {
+        "litellm": request.app.state.litellm_map,
+        "openrouter": request.app.state.openrouter,
+        "modelsdev": request.app.state.modelsdev,
+    }[body.source]
+    entry = source.get(body.key)
     if entry is None:
         raise HTTPException(
             status_code=404, detail=f"no {body.source} entry named {body.key!r}"

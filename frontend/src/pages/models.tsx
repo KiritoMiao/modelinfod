@@ -122,6 +122,9 @@ export default function ModelsPage() {
             <TableHeader className="text-right">Max out</TableHeader>
             <TableHeader className="text-right">Input $/1M</TableHeader>
             <TableHeader className="text-right">Output $/1M</TableHeader>
+            <TableHeader className="text-right" title="Cache read / write per 1M tokens">
+              Cache r/w $/1M
+            </TableHeader>
             <TableHeader>Flags</TableHeader>
             <TableHeader className="relative w-0">
               <span className="sr-only">Actions</span>
@@ -131,14 +134,14 @@ export default function ModelsPage() {
         <TableBody>
           {loading && (
             <TableRow>
-              <TableCell colSpan={8} className="text-center text-zinc-500">
+              <TableCell colSpan={9} className="text-center text-zinc-500">
                 Loading…
               </TableCell>
             </TableRow>
           )}
           {!loading && filtered.length === 0 && (
             <TableRow>
-              <TableCell colSpan={8} className="text-center text-zinc-500">
+              <TableCell colSpan={9} className="text-center text-zinc-500">
                 {entries.length === 0
                   ? 'No models. Check upstream sync on the Status page.'
                   : 'No models match the filter.'}
@@ -196,12 +199,40 @@ export default function ModelsPage() {
                 <TableCell className="text-right tabular-nums">
                   {formatCostPerMillion(info.output_cost_per_token)}
                 </TableCell>
+                <TableCell
+                  className="text-right tabular-nums"
+                  title={
+                    info.cache_cost_source === 'modelsdev'
+                      ? 'Cache pricing filled in from models.dev'
+                      : undefined
+                  }
+                >
+                  {formatCostPerMillion(info.cache_read_input_token_cost)}
+                  {' / '}
+                  {formatCostPerMillion(info.cache_creation_input_token_cost)}
+                  {info.cache_cost_source === 'modelsdev' && (
+                    <span className="ml-1 text-zinc-400">*</span>
+                  )}
+                </TableCell>
                 <TableCell>
                   <div className="flex gap-1 whitespace-nowrap">
                     {Boolean(info.supports_vision) && <Badge>vision</Badge>}
                     {Boolean(info.supports_function_calling) && <Badge>tools</Badge>}
                     {Boolean(info.supports_reasoning) && <Badge>reasoning</Badge>}
                     {Boolean(info.supports_prompt_caching) && <Badge>caching</Badge>}
+                    {Boolean(info.tiered_pricing) && (
+                      <Badge color="amber" title="Price changes above a context threshold">
+                        tiered
+                      </Badge>
+                    )}
+                    {Boolean(info.priority_pricing) && (
+                      <Badge color="fuchsia" title="Publishes a priority/fast service tier">
+                        priority
+                      </Badge>
+                    )}
+                    {typeof info.service_tier === 'string' && (
+                      <Badge color="fuchsia">{String(info.service_tier)}</Badge>
+                    )}
                   </div>
                 </TableCell>
                 <TableCell>

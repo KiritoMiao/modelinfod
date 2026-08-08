@@ -16,18 +16,21 @@ export interface ModelEntry {
     override_inherited_from: string | null // bare model name supplying the override
     is_custom: boolean
     in_upstream: boolean
-    manual_match: string | null // "litellm:<key>" | "openrouter:<id>"
+    manual_match: string | null // "<source>:<key>"
   }
 }
 
+export type MetadataSource = 'modelsdev' | 'litellm' | 'openrouter'
+
 export interface MetadataKey {
-  source: 'litellm' | 'openrouter'
+  source: MetadataSource
   key: string
   info: {
     max_input_tokens?: number
     max_output_tokens?: number
     input_cost_per_token?: number
     output_cost_per_token?: number
+    cache_read_input_token_cost?: number
     litellm_provider?: string
     mode?: string
   }
@@ -49,6 +52,8 @@ export interface StatusInfo {
   prices_source: string
   openrouter_entries: number
   openrouter_refreshed_at: number | null
+  modelsdev_entries: number
+  modelsdev_refreshed_at: number | null
   sync_interval_seconds: number
 }
 
@@ -95,6 +100,8 @@ export const api = {
     request<{ entries: number }>('/refresh-prices', { method: 'POST' }),
   refreshOpenrouter: () =>
     request<{ entries: number }>('/refresh-openrouter', { method: 'POST' }),
+  refreshModelsdev: () =>
+    request<{ entries: number }>('/refresh-modelsdev', { method: 'POST' }),
   reloadOverrides: () =>
     request<{ overrides: number; errors: string[] }>('/reload-overrides', {
       method: 'POST',
@@ -103,7 +110,7 @@ export const api = {
     request<{ data: MetadataKey[] }>(
       `/metadata-keys?q=${encodeURIComponent(q)}&limit=${limit}`
     ),
-  setMatch: (name: string, source: MetadataKey['source'], key: string) =>
+  setMatch: (name: string, source: MetadataSource, key: string) =>
     request(`/models/${encodeURIComponent(name)}/match`, {
       method: 'PUT',
       body: JSON.stringify({ source, key }),
